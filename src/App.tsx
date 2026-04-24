@@ -123,15 +123,21 @@ export default function App() {
     setSelectedId(prev => prev === id ? null : prev);
   }, []);
 
-  const exportAll = useCallback(() => {
+  const exportAll = useCallback(async () => {
     if (!processedImageData) return;
-    for (const sprite of sprites) {
+    for (let i = 0; i < sprites.length; i++) {
+      const sprite = sprites[i];
+      const url = extractSpriteDataURL(processedImageData, sprite);
+      const blob = await (await fetch(url)).blob();
+      const blobUrl = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = extractSpriteDataURL(processedImageData, sprite);
+      a.href = blobUrl;
       a.download = `${sprite.label}.png`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
+      await new Promise(r => setTimeout(r, 180));
     }
   }, [processedImageData, sprites]);
 
