@@ -8,7 +8,7 @@ export interface SpriteRect {
 }
 
 export function rgbToHex([r, g, b]: [number, number, number]): string {
-  return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
+  return '#' + [r, g, b].map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
 }
 
 export function hexToRgb(hex: string): [number, number, number] {
@@ -22,22 +22,42 @@ export function sampleColor(imageData: ImageData, x: number, y: number): [number
 }
 
 export function autoSampleBackground(imageData: ImageData): [number, number, number] {
-  // Sample the four corners and pick the most common color
   const { width, height, data } = imageData;
-  const corners: [number, number][] = [[0, 0], [width - 1, 0], [0, height - 1], [width - 1, height - 1]];
-  const samples = corners.map(([x, y]) => sampleColor(imageData, x, y));
-  // Return the first corner color as a simple heuristic
-  return samples[0];
+  const counts = new Map<number, number>();
+  const samples: Array<[number, number]> = [];
+  const step = Math.max(2, Math.floor(Math.min(width, height) / 40));
+  for (let x = 0; x < width; x += step) {
+    samples.push([x, 0], [x, height - 1]);
+  }
+  for (let y = 0; y < height; y += step) {
+    samples.push([0, y], [width - 1, y]);
+  }
+  for (const [x, y] of samples) {
+    const i = (y * width + x) * 4;
+    const r = data[i] >> 3, g = data[i + 1] >> 3, b = data[i + 2] >> 3;
+    const key = (r << 10) | (g << 5) | b;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  let best = 0, bestCount = 0;
+  for (const [k, v] of counts) {
+    if (v > bestCount) { bestCount = v; best = k; }
+  }
+  const r = ((best >> 10) & 31) << 3;
+  const g = ((best >> 5) & 31) << 3;
+  const b = (best & 31) << 3;
+  return [r, g, b];
 }
 
 function colorDist(r: number, g: number, b: number, tr: number, tg: number, tb: number): number {
-  return Math.sqrt((r - tr) ** 2 + (g - tg) ** 2 + (b - tb) ** 2);
+  const dr = r - tr, dg = g - tg, db = b - tb;
+  return Math.sqrt(dr * dr + dg * dg + db * db);
 }
 
 export function removeBackground(
   imageData: ImageData,
   bgColor: [number, number, number],
-  tolerance: number
+  tolerance: number,
+  feather: number = 12
 ): ImageData {
   const { width, height, data } = imageData;
   const out = new Uint8ClampedArray(data);
@@ -45,9 +65,38 @@ export function removeBackground(
 
   for (let i = 0; i < data.length; i += 4) {
     const r = data[i], g = data[i + 1], b = data[i + 2];
-    if (colorDist(r, g, b, tr, tg, tb) <= tolerance) {
+    const d = colorDist(r, g, b, tr, tg, tb);
+    if (d <= tolerance) {
       out[i + 3] = 0;
+    } else if (d <= tolerance + feather) {
+      const t = (d - tolerance) / feather;
+      out[i + 3] = Math.round(out[i + 3] * t);
     }
+  }
+
+  return new ImageData(out, width, height);
+}
+
+// Decontaminate partially-transparent edge pixels: remove bg-color bleed from RGB
+// Inverts: composite = alpha*true + (1-alpha)*bg  =>  true = (composite - (1-alpha)*bg) / alpha
+function decontaminateEdges(
+  imageData: ImageData,
+  bgColor: [number, number, number]
+): ImageData {
+  const { width, height, data } = imageData;
+  const out = new Uint8ClampedArray(data);
+  const [br, bg, bb] = bgColor;
+
+  for (let i = 0; i < data.length; i += 4) {
+    const a = data[i + 3];
+    if (a === 0 || a === 255) continue;
+    const alpha = a / 255;
+    const r = (data[i] - (1 - alpha) * br) / alpha;
+    const g = (data[i + 1] - (1 - alpha) * bg) / alpha;
+    const b = (data[i + 2] - (1 - alpha) * bb) / alpha;
+    out[i]     = Math.max(0, Math.min(255, r));
+    out[i + 1] = Math.max(0, Math.min(255, g));
+    out[i + 2] = Math.max(0, Math.min(255, b));
   }
 
   return new ImageData(out, width, height);
@@ -58,18 +107,17 @@ export function refineEdges(
   bgColor: [number, number, number],
   edgeWidth: number
 ): ImageData {
+  if (edgeWidth === 0) return decontaminateEdges(imageData, bgColor);
+
   const { width, height, data } = imageData;
   const out = new Uint8ClampedArray(data);
   const [tr, tg, tb] = bgColor;
-  const bgLum = 0.299 * tr + 0.587 * tg + 0.114 * tb;
-  const isDark = bgLum < 64;
 
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const i = (y * width + x) * 4;
       if (data[i + 3] === 0) continue;
 
-      // Check if this pixel is near a transparent pixel
       let nearTransparent = false;
       outer: for (let dy = -edgeWidth; dy <= edgeWidth; dy++) {
         for (let dx = -edgeWidth; dx <= edgeWidth; dx++) {
@@ -79,63 +127,67 @@ export function refineEdges(
           if (data[ni + 3] === 0) { nearTransparent = true; break outer; }
         }
       }
-
       if (!nearTransparent) continue;
 
       const r = data[i], g = data[i + 1], b = data[i + 2];
-      if (isDark) {
-        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-        const alpha = Math.min(255, lum * 2);
-        out[i + 3] = alpha;
-      } else {
-        const dist = colorDist(r, g, b, tr, tg, tb);
-        const maxDist = Math.sqrt(3 * 255 ** 2);
-        const alpha = Math.min(255, Math.round((dist / maxDist) * 255 * 3));
-        out[i + 3] = alpha;
-      }
+      const dist = colorDist(r, g, b, tr, tg, tb);
+      const maxDist = Math.sqrt(3) * 255;
+      const alpha = Math.min(255, Math.round((dist / maxDist) * 255 * 3));
+      out[i + 3] = alpha;
     }
   }
 
-  return new ImageData(out, width, height);
+  return decontaminateEdges(new ImageData(out, width, height), bgColor);
 }
 
 function erode(mask: Uint8Array, width: number, height: number, radius: number): Uint8Array {
   if (radius === 0) return mask;
+  // Two-pass separable erosion (min filter) for speed
+  const tmp = new Uint8Array(mask.length);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let keep = 1;
+      for (let dx = -radius; dx <= radius; dx++) {
+        const nx = x + dx;
+        if (nx < 0 || nx >= width || mask[y * width + nx] === 0) { keep = 0; break; }
+      }
+      tmp[y * width + x] = keep;
+    }
+  }
   const result = new Uint8Array(mask.length);
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      let keep = true;
-      outer: for (let dy = -radius; dy <= radius; dy++) {
-        for (let dx = -radius; dx <= radius; dx++) {
-          const nx = x + dx, ny = y + dy;
-          if (nx < 0 || ny < 0 || nx >= width || ny >= height || mask[ny * width + nx] === 0) {
-            keep = false; break outer;
-          }
-        }
+      let keep = 1;
+      for (let dy = -radius; dy <= radius; dy++) {
+        const ny = y + dy;
+        if (ny < 0 || ny >= height || tmp[ny * width + x] === 0) { keep = 0; break; }
       }
-      result[y * width + x] = keep ? 1 : 0;
+      result[y * width + x] = keep;
     }
   }
   return result;
 }
 
-export function detectSprites(
-  imageData: ImageData,
-  minPixels: number,
-  padding: number,
-  erosionRadius: number
-): SpriteRect[] {
-  const { width, height, data } = imageData;
+export interface DetectionOptions {
+  minPixels: number;
+  padding: number;
+  erosionRadius: number;
+  minDim: number;
+  maxAspect: number;
+  alphaThreshold: number;
+}
 
-  // Build opacity mask
+export function detectSprites(imageData: ImageData, opts: DetectionOptions): SpriteRect[] {
+  const { width, height, data } = imageData;
+  const { minPixels, padding, erosionRadius, minDim, maxAspect, alphaThreshold } = opts;
+
   const mask = new Uint8Array(width * height);
   for (let i = 0; i < width * height; i++) {
-    mask[i] = data[i * 4 + 3] > 10 ? 1 : 0;
+    mask[i] = data[i * 4 + 3] >= alphaThreshold ? 1 : 0;
   }
 
   const eroded = erode(mask, width, height, erosionRadius);
 
-  // Connected components on eroded mask
   const labels = new Int32Array(width * height).fill(-1);
   let nextLabel = 0;
   const stack: number[] = [];
@@ -147,8 +199,9 @@ export function detectSprites(
     stack.push(start);
     while (stack.length) {
       const idx = stack.pop()!;
-      const cx = idx % width, cy = Math.floor(idx / width);
-      for (const [dx, dy] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+      const cx = idx % width, cy = (idx / width) | 0;
+      const neighbors = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+      for (const [dx, dy] of neighbors) {
         const nx = cx + dx, ny = cy + dy;
         if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
         const ni = ny * width + nx;
@@ -160,52 +213,47 @@ export function detectSprites(
     }
   }
 
-  // Map eroded labels back to original mask pixels
-  const spriteLabels = new Int32Array(width * height).fill(-1);
-  for (let i = 0; i < width * height; i++) {
-    if (mask[i] === 1) {
-      // Find nearest eroded pixel with a label (within erosion radius)
-      const x = i % width, y = Math.floor(i / width);
-      let best = -1;
-      for (let dy = -erosionRadius - 1; dy <= erosionRadius + 1 && best === -1; dy++) {
-        for (let dx = -erosionRadius - 1; dx <= erosionRadius + 1 && best === -1; dx++) {
-          const nx = x + dx, ny = y + dy;
-          if (nx >= 0 && ny >= 0 && nx < width && ny < height) {
-            const ni = ny * width + nx;
-            if (labels[ni] !== -1) best = labels[ni];
-          }
-        }
-      }
-      spriteLabels[i] = best;
-    }
-  }
-
-  // Compute bounding boxes
+  // Compute boxes from eroded labels directly
   const boxes = new Map<number, { x1: number; y1: number; x2: number; y2: number; count: number }>();
-  for (let i = 0; i < spriteLabels.length; i++) {
-    const lbl = spriteLabels[i];
+  for (let i = 0; i < labels.length; i++) {
+    const lbl = labels[i];
     if (lbl === -1) continue;
-    const x = i % width, y = Math.floor(i / width);
-    if (!boxes.has(lbl)) boxes.set(lbl, { x1: x, y1: y, x2: x, y2: y, count: 0 });
-    const b = boxes.get(lbl)!;
-    b.x1 = Math.min(b.x1, x); b.y1 = Math.min(b.y1, y);
-    b.x2 = Math.max(b.x2, x); b.y2 = Math.max(b.y2, y);
+    const x = i % width, y = (i / width) | 0;
+    let b = boxes.get(lbl);
+    if (!b) { b = { x1: x, y1: y, x2: x, y2: y, count: 0 }; boxes.set(lbl, b); }
+    if (x < b.x1) b.x1 = x;
+    if (y < b.y1) b.y1 = y;
+    if (x > b.x2) b.x2 = x;
+    if (y > b.y2) b.y2 = y;
     b.count++;
   }
 
+  // Expand boxes back by erosion radius so they encompass full sprite
   const results: SpriteRect[] = [];
   let idx = 1;
   for (const [, b] of boxes) {
     if (b.count < minPixels) continue;
-    const x = Math.max(0, b.x1 - padding);
-    const y = Math.max(0, b.y1 - padding);
-    const x2 = Math.min(width - 1, b.x2 + padding);
-    const y2 = Math.min(height - 1, b.y2 + padding);
-    results.push({ id: idx, x, y, width: x2 - x + 1, height: y2 - y + 1, label: `sprite_${String(idx).padStart(2, '0')}` });
+    const grow = erosionRadius + padding;
+    const x = Math.max(0, b.x1 - grow);
+    const y = Math.max(0, b.y1 - grow);
+    const x2 = Math.min(width - 1, b.x2 + grow);
+    const y2 = Math.min(height - 1, b.y2 + grow);
+    const w = x2 - x + 1;
+    const h = y2 - y + 1;
+    if (w < minDim || h < minDim) continue;
+    const aspect = Math.max(w, h) / Math.min(w, h);
+    if (aspect > maxAspect) continue;
+    results.push({ id: idx, x, y, width: w, height: h, label: `sprite_${String(idx).padStart(2, '0')}` });
     idx++;
   }
 
-  return results.sort((a, b) => a.y - b.y || a.x - b.x);
+  results.sort((a, b) => {
+    const rowA = Math.floor(a.y / 40), rowB = Math.floor(b.y / 40);
+    if (rowA !== rowB) return rowA - rowB;
+    return a.x - b.x;
+  });
+
+  return results.map((r, i) => ({ ...r, id: i + 1, label: `sprite_${String(i + 1).padStart(2, '0')}` }));
 }
 
 export function extractSpriteDataURL(processedImageData: ImageData, rect: SpriteRect): string {
@@ -228,7 +276,8 @@ export function extractSpriteDataURL(processedImageData: ImageData, rect: Sprite
   const dst = document.createElement('canvas');
   dst.width = rect.width;
   dst.height = rect.height;
-  const dstCtx = dst.getContext('2d', { alpha: true, willReadFrequently: false })!;
+  const dstCtx = dst.getContext('2d', { alpha: true })!;
+  dstCtx.clearRect(0, 0, rect.width, rect.height);
   dstCtx.putImageData(cropped, 0, 0);
   return dst.toDataURL('image/png');
 }
