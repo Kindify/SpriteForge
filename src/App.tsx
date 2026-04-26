@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { Wand2, ZoomIn, ZoomOut, MousePointer, PenLine, RotateCcw, Download, Clipboard, Eraser, Undo2 } from 'lucide-react';
 import UploadZone from './components/UploadZone';
 import CanvasViewer from './components/CanvasViewer';
@@ -66,7 +66,7 @@ export default function App() {
   const [zoom, setZoom] = useState(1);
   const [drawMode, setDrawMode] = useState(false);
   const [eraseMode, setEraseMode] = useState(false);
-  const [brushSize, setBrushSize] = useState(14);
+  const [brushSize, setBrushSize] = useState(4);
   const [brushHardness, setBrushHardness] = useState(80);
   const undoStack = useRef<ImageData[]>([]);
 
@@ -192,6 +192,32 @@ export default function App() {
     const prev = undoStack.current.pop();
     if (prev) setProcessedImageData(prev);
   }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (e.key === '[') {
+        e.preventDefault();
+        setBrushSize(s => Math.max(1, s <= 4 ? s - 1 : s <= 16 ? s - 2 : Math.round(s * 0.85)));
+      } else if (e.key === ']') {
+        e.preventDefault();
+        setBrushSize(s => Math.min(500, s < 4 ? s + 1 : s < 16 ? s + 2 : Math.round(s * 1.18)));
+      } else if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+        if (eraseMode) {
+          e.preventDefault();
+          undo();
+        }
+      } else if (e.key === 'e' || e.key === 'E') {
+        if (processedImageData) {
+          setEraseMode(m => !m);
+          setDrawMode(false);
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [eraseMode, processedImageData, undo]);
 
   const handlePixelClick = useCallback((x: number, y: number) => {
     if (!rawImageData) return;
@@ -393,10 +419,30 @@ export default function App() {
                       <Undo2 className="w-3.5 h-3.5" /> Undo
                     </button>
                   </div>
-                  <Slider
-                    label="Brush size"
-                    hint="Click and drag on the canvas to paint transparency. Use the toolbar zoom (or mouse wheel) for precision on small artifacts."
-                    value={brushSize} min={1} max={120} onChange={setBrushSize} suffix="px" />
+                  <div>
+                    <div className="flex justify-between items-baseline mb-0.5">
+                      <span className="text-[11px] font-semibold text-gray-300">Brush size</span>
+                      <div className="flex items-center gap-1">
+                        <input type="number" min={1} max={500} value={brushSize}
+                          onChange={e => setBrushSize(Math.max(1, Math.min(500, parseInt(e.target.value) || 1)))}
+                          className="w-12 bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-[11px] font-mono text-cyan-400 outline-none focus:border-cyan-500 text-right" />
+                        <span className="text-[10px] text-gray-600">px</span>
+                      </div>
+                    </div>
+                    <p className="text-[10px] text-gray-600 mb-1.5 leading-tight">
+                      Diameter in image pixels. Drag the slider for coarse changes, type a number for exact, or use [ / ] keys.
+                    </p>
+                    <input type="range" min={1} max={120} step={1} value={Math.min(120, brushSize)}
+                      onChange={e => setBrushSize(+e.target.value)} className="w-full accent-cyan-400" />
+                    <div className="flex gap-1 mt-1.5">
+                      {[1, 2, 4, 8, 16, 32].map(s => (
+                        <button key={s} onClick={() => setBrushSize(s)}
+                          className={`flex-1 py-1 rounded text-[10px] font-mono transition-colors ${brushSize === s ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
+                          {s}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                   <Slider
                     label="Brush hardness"
                     hint="100 = sharp circular eraser. Lower values feather the brush edge for soft cleanups."
