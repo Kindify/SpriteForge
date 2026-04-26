@@ -56,6 +56,29 @@ function imageDataToCanvas(data: ImageData): HTMLCanvasElement {
   return c;
 }
 
+function buildExportImage(
+  src: ImageData,
+  targetW: number,
+  targetH: number,
+  fit: 'contain' | 'stretch',
+  mode: 'pixel' | 'smooth'
+): ImageData {
+  const cropped = cropToAlphaBounds(src, 0);
+  if (fit === 'stretch') return resizeImage(cropped, targetW, targetH, mode);
+  const scale = Math.min(targetW / cropped.width, targetH / cropped.height);
+  const w = Math.max(1, Math.round(cropped.width * scale));
+  const h = Math.max(1, Math.round(cropped.height * scale));
+  const scaled = resizeImage(cropped, w, h, mode);
+  const out = document.createElement('canvas');
+  out.width = targetW;
+  out.height = targetH;
+  const ctx = out.getContext('2d', { alpha: true })!;
+  ctx.clearRect(0, 0, targetW, targetH);
+  const tmp = imageDataToCanvas(scaled);
+  ctx.drawImage(tmp, Math.floor((targetW - w) / 2), Math.floor((targetH - h) / 2));
+  return ctx.getImageData(0, 0, targetW, targetH);
+}
+
 export default function App() {
   const sourceRef = useRef<HTMLImageElement | null>(null);
   const [mode, setMode] = useState<'single' | 'sheet'>('single');
@@ -86,6 +109,12 @@ export default function App() {
   const [scaleMode, setScaleMode] = useState<'pixel' | 'smooth'>('smooth');
   const [sizePreset, setSizePreset] = useState<string>('128');
   const [copied, setCopied] = useState(false);
+
+  const [exportEnabled, setExportEnabled] = useState(true);
+  const [exportW, setExportW] = useState(128);
+  const [exportH, setExportH] = useState(128);
+  const [exportFit, setExportFit] = useState<'contain' | 'stretch'>('contain');
+  const [exportLockAspect, setExportLockAspect] = useState(true);
 
   const loadImage = useCallback((img: HTMLImageElement) => {
     sourceRef.current = img;
@@ -261,28 +290,36 @@ export default function App() {
     }
   }, [processedImageData, sprites]);
 
+  const buildFinalCanvas = useCallback((): HTMLCanvasElement | null => {
+    if (!processedImageData) return null;
+    const out = exportEnabled
+      ? buildExportImage(processedImageData, Math.max(1, exportW), Math.max(1, exportH), exportFit, scaleMode)
+      : processedImageData;
+    return imageDataToCanvas(out);
+  }, [processedImageData, exportEnabled, exportW, exportH, exportFit, scaleMode]);
+
   const downloadSingle = useCallback(async () => {
-    if (!processedImageData) return;
-    const canvas = imageDataToCanvas(processedImageData);
+    const canvas = buildFinalCanvas();
+    if (!canvas) return;
     const url = canvas.toDataURL('image/png');
     const blob = await (await fetch(url)).blob();
     const blobUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = blobUrl;
-    a.download = 'sprite.png';
+    a.download = `sprite_${canvas.width}x${canvas.height}.png`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
-  }, [processedImageData]);
+  }, [buildFinalCanvas]);
 
   const copyBase64 = useCallback(async () => {
-    if (!processedImageData) return;
-    const canvas = imageDataToCanvas(processedImageData);
+    const canvas = buildFinalCanvas();
+    if (!canvas) return;
     await navigator.clipboard.writeText(canvas.toDataURL('image/png'));
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
-  }, [processedImageData]);
+  }, [buildFinalCanvas]);
 
   const reset = useCallback(() => {
     sourceRef.current = null;
@@ -310,7 +347,7 @@ export default function App() {
         <div className="px-4 py-4 border-b border-gray-800">
           <div className="flex items-center gap-2 mb-1">
             <Wand2 className="w-4 h-4 text-cyan-400" />
-            <span className="text-sm font-bold tracking-tight text-white">SpriteSnip</span>
+            <span className="text-sm font-bold tracking-tight text-white">Sprites Forge</span>
           </div>
           <p className="text-[10px] text-gray-600">Cut sprites from a sheet. Real RGBA PNG output.</p>
         </div>
@@ -510,16 +547,81 @@ export default function App() {
               </button>
 
               {mode === 'single' && processedImageData && (
-                <div className="flex gap-2">
-                  <button onClick={downloadSingle}
-                    className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors">
-                    <Download className="w-3.5 h-3.5" /> Download PNG
-                  </button>
-                  <button onClick={copyBase64}
-                    className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-semibold transition-colors">
-                    <Clipboard className="w-3.5 h-3.5" /> {copied ? 'Copied!' : 'Copy as base64'}
-                  </button>
-                </div>
+                <>
+                  <section className="flex flex-col gap-3 rounded-lg border border-gray-800 bg-gray-900/60 p-3">
+                    <div className="flex items-center justify-between">
+                      <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest">Export size</label>
+                      <button onClick={() => setExportEnabled(v => !v)}
+                        className={`text-[10px] font-semibold px-2 py-0.5 rounded transition-colors ${exportEnabled ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400'}`}>
+                        {exportEnabled ? 'On' : 'Off'}
+                      </button>
+                    </div>
+
+                    <div className={exportEnabled ? '' : 'opacity-40 pointer-events-none'}>
+                      <div className="grid grid-cols-5 gap-1 mb-2">
+                        {[16, 32, 64, 128, 256].map(s => (
+                          <button key={s} onClick={() => { setExportW(s); setExportH(s); }}
+                            className={`py-1 rounded text-[10px] font-mono transition-colors ${exportW === s && exportH === s ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
+                            {s}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        <div className="flex-1">
+                          <span className="text-[10px] text-gray-500 block mb-0.5">Width</span>
+                          <input type="number" min={1} max={4096} value={exportW}
+                            onChange={e => {
+                              const v = Math.max(1, Math.min(4096, parseInt(e.target.value) || 1));
+                              setExportW(v);
+                              if (exportLockAspect) setExportH(v);
+                            }}
+                            className="w-full bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-[11px] font-mono text-gray-200 outline-none focus:border-cyan-500" />
+                        </div>
+                        <button onClick={() => setExportLockAspect(v => !v)}
+                          title={exportLockAspect ? 'Locked square (W=H)' : 'Free aspect ratio'}
+                          className={`mt-4 px-2 py-1 rounded text-[10px] font-semibold transition-colors ${exportLockAspect ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-500 hover:bg-gray-700'}`}>
+                          {exportLockAspect ? '=' : '\u2260'}
+                        </button>
+                        <div className="flex-1">
+                          <span className="text-[10px] text-gray-500 block mb-0.5">Height</span>
+                          <input type="number" min={1} max={4096} value={exportH}
+                            onChange={e => {
+                              const v = Math.max(1, Math.min(4096, parseInt(e.target.value) || 1));
+                              setExportH(v);
+                              if (exportLockAspect) setExportW(v);
+                            }}
+                            className="w-full bg-gray-800 border border-gray-700 rounded px-1.5 py-1 text-[11px] font-mono text-gray-200 outline-none focus:border-cyan-500" />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-1.5 mt-2">
+                        <button onClick={() => setExportFit('contain')}
+                          className={`py-1.5 rounded text-[10px] font-medium transition-colors ${exportFit === 'contain' ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
+                          Fit (centered)
+                        </button>
+                        <button onClick={() => setExportFit('stretch')}
+                          className={`py-1.5 rounded text-[10px] font-medium transition-colors ${exportFit === 'stretch' ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
+                          Stretch
+                        </button>
+                      </div>
+                      <p className="text-[10px] text-gray-600 mt-1.5 leading-tight">
+                        Fit re-crops to the sprite, scales to fit inside W x H, and centers it on a transparent square. Stretch fills the canvas exactly. Uses the {scaleMode} scaling style above.
+                      </p>
+                    </div>
+                  </section>
+
+                  <div className="flex gap-2">
+                    <button onClick={downloadSingle}
+                      className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors">
+                      <Download className="w-3.5 h-3.5" /> Download PNG
+                    </button>
+                    <button onClick={copyBase64}
+                      className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-semibold transition-colors">
+                      <Clipboard className="w-3.5 h-3.5" /> {copied ? 'Copied!' : 'Copy as base64'}
+                    </button>
+                  </div>
+                </>
               )}
 
               <button onClick={reset}
