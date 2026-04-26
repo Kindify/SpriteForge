@@ -281,3 +281,78 @@ export function extractSpriteDataURL(processedImageData: ImageData, rect: Sprite
   dstCtx.putImageData(cropped, 0, 0);
   return dst.toDataURL('image/png');
 }
+
+export function cropToAlphaBounds(
+  imageData: ImageData,
+  padding: number,
+  alphaThreshold: number = 10
+): ImageData {
+  const { width, height, data } = imageData;
+  let minX = width, minY = height, maxX = -1, maxY = -1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const a = data[(y * width + x) * 4 + 3];
+      if (a >= alphaThreshold) {
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < 0) return imageData;
+
+  const x1 = Math.max(0, minX - padding);
+  const y1 = Math.max(0, minY - padding);
+  const x2 = Math.min(width - 1, maxX + padding);
+  const y2 = Math.min(height - 1, maxY + padding);
+  const w = x2 - x1 + 1;
+  const h = y2 - y1 + 1;
+  const out = new Uint8ClampedArray(w * h * 4);
+  for (let row = 0; row < h; row++) {
+    for (let col = 0; col < w; col++) {
+      const srcIdx = ((y1 + row) * width + (x1 + col)) * 4;
+      const dstIdx = (row * w + col) * 4;
+      out[dstIdx]     = data[srcIdx];
+      out[dstIdx + 1] = data[srcIdx + 1];
+      out[dstIdx + 2] = data[srcIdx + 2];
+      out[dstIdx + 3] = data[srcIdx + 3];
+    }
+  }
+  return new ImageData(out, w, h);
+}
+
+export function resizeImage(
+  imageData: ImageData,
+  targetW: number,
+  targetH: number,
+  mode: 'pixel' | 'smooth'
+): ImageData {
+  const src = document.createElement('canvas');
+  src.width = imageData.width;
+  src.height = imageData.height;
+  src.getContext('2d', { alpha: true })!.putImageData(imageData, 0, 0);
+
+  const dst = document.createElement('canvas');
+  dst.width = targetW;
+  dst.height = targetH;
+  const ctx = dst.getContext('2d', { alpha: true })!;
+  ctx.imageSmoothingEnabled = mode === 'smooth';
+  ctx.imageSmoothingQuality = 'high';
+  ctx.clearRect(0, 0, targetW, targetH);
+  ctx.drawImage(src, 0, 0, targetW, targetH);
+  return ctx.getImageData(0, 0, targetW, targetH);
+}
+
+export function detectPixelArt(imageData: ImageData): boolean {
+  const { width, height, data } = imageData;
+  if (Math.max(width, height) > 256) return false;
+  const colors = new Set<number>();
+  for (let i = 0; i < data.length; i += 16) {
+    if (data[i + 3] < 128) continue;
+    const key = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+    colors.add(key);
+    if (colors.size > 64) return false;
+  }
+  return colors.size <= 64;
+}

@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import { Wand2, ZoomIn, ZoomOut, MousePointer, PenLine, RotateCcw } from 'lucide-react';
+import { Wand2, ZoomIn, ZoomOut, MousePointer, PenLine, RotateCcw, Download, Clipboard } from 'lucide-react';
 import UploadZone from './components/UploadZone';
 import CanvasViewer from './components/CanvasViewer';
 import SpriteRoster from './components/SpriteRoster';
@@ -12,6 +12,9 @@ import {
   extractSpriteDataURL,
   hexToRgb,
   rgbToHex,
+  cropToAlphaBounds,
+  resizeImage,
+  detectPixelArt,
 } from './utils/imageProcessing';
 
 let nextId = 1;
@@ -45,8 +48,17 @@ function Slider({ label, hint, value, min, max, step = 1, suffix = '', onChange 
   );
 }
 
+function imageDataToCanvas(data: ImageData): HTMLCanvasElement {
+  const c = document.createElement('canvas');
+  c.width = data.width;
+  c.height = data.height;
+  c.getContext('2d', { alpha: true })!.putImageData(data, 0, 0);
+  return c;
+}
+
 export default function App() {
   const sourceRef = useRef<HTMLImageElement | null>(null);
+  const [mode, setMode] = useState<'single' | 'sheet'>('single');
   const [rawImageData, setRawImageData] = useState<ImageData | null>(null);
   const [processedImageData, setProcessedImageData] = useState<ImageData | null>(null);
   const [sprites, setSprites] = useState<SpriteRect[]>([]);
@@ -64,6 +76,13 @@ export default function App() {
   const [maxAspect, setMaxAspect] = useState(3);
   const [padding, setPadding] = useState(4);
 
+  const [targetSize, setTargetSize] = useState<number>(128);
+  const [customW, setCustomW] = useState<number>(128);
+  const [customH, setCustomH] = useState<number>(128);
+  const [scaleMode, setScaleMode] = useState<'pixel' | 'smooth'>('smooth');
+  const [sizePreset, setSizePreset] = useState<string>('128');
+  const [copied, setCopied] = useState(false);
+
   const loadImage = useCallback((img: HTMLImageElement) => {
     sourceRef.current = img;
     nextId = 1;
@@ -79,6 +98,8 @@ export default function App() {
     setSelectedId(null);
     const sampled = autoSampleBackground(data);
     setBgColor(rgbToHex(sampled));
+    const isPixelArt = detectPixelArt(data);
+    setScaleMode(isPixelArt ? 'pixel' : 'smooth');
   }, []);
 
   const process = useCallback(() => {
@@ -86,6 +107,28 @@ export default function App() {
     const rgb = hexToRgb(bgColor);
     let out = removeBackground(rawImageData, rgb, tolerance, feather);
     out = refineEdges(out, rgb, edgeWidth);
+
+    if (mode === 'single') {
+      out = cropToAlphaBounds(out, 2);
+      let tw = out.width, th = out.height;
+      if (sizePreset !== 'original') {
+        if (sizePreset === 'custom') {
+          tw = Math.max(1, customW);
+          th = Math.max(1, customH);
+        } else {
+          const s = targetSize;
+          const scale = s / Math.max(out.width, out.height);
+          tw = Math.max(1, Math.round(out.width * scale));
+          th = Math.max(1, Math.round(out.height * scale));
+        }
+        out = resizeImage(out, tw, th, scaleMode);
+      }
+      setProcessedImageData(out);
+      setSprites([]);
+      setSelectedId(null);
+      return;
+    }
+
     setProcessedImageData(out);
     const detected = detectSprites(out, {
       minPixels,
@@ -97,7 +140,7 @@ export default function App() {
     });
     setSprites(assignIds(detected));
     setSelectedId(null);
-  }, [rawImageData, bgColor, tolerance, feather, edgeWidth, minPixels, minDim, maxAspect, padding, erosion]);
+  }, [rawImageData, bgColor, tolerance, feather, edgeWidth, minPixels, minDim, maxAspect, padding, erosion, mode, sizePreset, targetSize, customW, customH, scaleMode]);
 
   const handlePixelClick = useCallback((x: number, y: number) => {
     if (!rawImageData) return;
@@ -141,6 +184,29 @@ export default function App() {
     }
   }, [processedImageData, sprites]);
 
+  const downloadSingle = useCallback(async () => {
+    if (!processedImageData) return;
+    const canvas = imageDataToCanvas(processedImageData);
+    const url = canvas.toDataURL('image/png');
+    const blob = await (await fetch(url)).blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = 'sprite.png';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
+  }, [processedImageData]);
+
+  const copyBase64 = useCallback(async () => {
+    if (!processedImageData) return;
+    const canvas = imageDataToCanvas(processedImageData);
+    await navigator.clipboard.writeText(canvas.toDataURL('image/png'));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }, [processedImageData]);
+
   const reset = useCallback(() => {
     sourceRef.current = null;
     setRawImageData(null);
@@ -150,6 +216,13 @@ export default function App() {
     setZoom(1);
     setDrawMode(false);
     nextId = 1;
+  }, []);
+
+  const handlePresetChange = useCallback((v: string) => {
+    setSizePreset(v);
+    if (v !== 'original' && v !== 'custom') {
+      setTargetSize(parseInt(v));
+    }
   }, []);
 
   const displayData = processedImageData ?? rawImageData;
@@ -166,6 +239,20 @@ export default function App() {
         </div>
 
         <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-5">
+          <section>
+            <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest block mb-2">Mode</label>
+            <div className="grid grid-cols-2 gap-1.5">
+              <button onClick={() => setMode('single')}
+                className={`py-2 rounded text-xs font-semibold transition-colors ${mode === 'single' ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
+                Single Sprite
+              </button>
+              <button onClick={() => setMode('sheet')}
+                className={`py-2 rounded text-xs font-semibold transition-colors ${mode === 'sheet' ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
+                Sprite Sheet
+              </button>
+            </div>
+          </section>
+
           <section>
             <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest block mb-2">1. Source image</label>
             <UploadZone onImageLoaded={loadImage} />
@@ -211,39 +298,108 @@ export default function App() {
                   value={edgeWidth} min={0} max={4} onChange={setEdgeWidth} suffix="px" />
               </section>
 
-              <section className="flex flex-col gap-4">
-                <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest block">4. Sprite detection</label>
+              {mode === 'sheet' && (
+                <section className="flex flex-col gap-4">
+                  <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest block">4. Sprite detection</label>
 
-                <Slider
-                  label="Separation strength"
-                  hint="How aggressively to pull sprites apart that touch or share glow. Turn UP if sprites merge into one box. Turn DOWN if small sprites vanish."
-                  value={erosion} min={0} max={12} onChange={setErosion} />
+                  <Slider
+                    label="Separation strength"
+                    hint="How aggressively to pull sprites apart that touch or share glow. Turn UP if sprites merge into one box. Turn DOWN if small sprites vanish."
+                    value={erosion} min={0} max={12} onChange={setErosion} />
 
-                <Slider
-                  label="Minimum sprite size (pixels)"
-                  hint="Ignores blobs smaller than this many pixels total. Raise to reject small specks, dots, and punctuation."
-                  value={minPixels} min={10} max={3000} step={10} onChange={setMinPixels} />
+                  <Slider
+                    label="Minimum sprite size (pixels)"
+                    hint="Ignores blobs smaller than this many pixels total. Raise to reject small specks, dots, and punctuation."
+                    value={minPixels} min={10} max={3000} step={10} onChange={setMinPixels} />
 
-                <Slider
-                  label="Minimum width/height"
-                  hint="Ignores boxes narrower or shorter than this. Raise to skip letters and thin labels (e.g. set to 35 to reject text)."
-                  value={minDim} min={1} max={200} onChange={setMinDim} suffix="px" />
+                  <Slider
+                    label="Minimum width/height"
+                    hint="Ignores boxes narrower or shorter than this. Raise to skip letters and thin labels (e.g. set to 35 to reject text)."
+                    value={minDim} min={1} max={200} onChange={setMinDim} suffix="px" />
 
-                <Slider
-                  label="Max shape stretchiness"
-                  hint="Rejects boxes that are much longer than they are tall (like words of text). Lower = stricter (squarer shapes only)."
-                  value={maxAspect} min={1} max={10} step={0.5} onChange={setMaxAspect} suffix="x" />
+                  <Slider
+                    label="Max shape stretchiness"
+                    hint="Rejects boxes that are much longer than they are tall (like words of text). Lower = stricter (squarer shapes only)."
+                    value={maxAspect} min={1} max={10} step={0.5} onChange={setMaxAspect} suffix="x" />
 
-                <Slider
-                  label="Crop padding"
-                  hint="Extra space added around each detected sprite when exporting. Prevents clipping glows or soft edges."
-                  value={padding} min={0} max={30} onChange={setPadding} suffix="px" />
-              </section>
+                  <Slider
+                    label="Crop padding"
+                    hint="Extra space added around each detected sprite when exporting. Prevents clipping glows or soft edges."
+                    value={padding} min={0} max={30} onChange={setPadding} suffix="px" />
+                </section>
+              )}
+
+              {mode === 'single' && (
+                <section className="flex flex-col gap-3">
+                  <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest block">4. Output size</label>
+
+                  <div>
+                    <span className="text-[11px] font-semibold text-gray-300 block mb-1">Preset</span>
+                    <select value={sizePreset} onChange={e => handlePresetChange(e.target.value)}
+                      className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-[11px] text-gray-300 outline-none focus:border-cyan-500">
+                      <option value="original">Original (auto-cropped)</option>
+                      <option value="16">16 px (longest side)</option>
+                      <option value="32">32 px</option>
+                      <option value="64">64 px</option>
+                      <option value="128">128 px</option>
+                      <option value="256">256 px</option>
+                      <option value="custom">Custom...</option>
+                    </select>
+                  </div>
+
+                  {sizePreset === 'custom' && (
+                    <div className="flex gap-2">
+                      <div className="flex-1">
+                        <span className="text-[10px] text-gray-500 block mb-1">Width</span>
+                        <input type="number" min={1} max={4096} value={customW}
+                          onChange={e => setCustomW(Math.max(1, parseInt(e.target.value) || 1))}
+                          className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] font-mono text-gray-300 outline-none focus:border-cyan-500" />
+                      </div>
+                      <div className="flex-1">
+                        <span className="text-[10px] text-gray-500 block mb-1">Height</span>
+                        <input type="number" min={1} max={4096} value={customH}
+                          onChange={e => setCustomH(Math.max(1, parseInt(e.target.value) || 1))}
+                          className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-[11px] font-mono text-gray-300 outline-none focus:border-cyan-500" />
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <span className="text-[11px] font-semibold text-gray-300 block mb-1">Scaling style</span>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <button onClick={() => setScaleMode('pixel')}
+                        className={`py-1.5 rounded text-[11px] font-medium transition-colors ${scaleMode === 'pixel' ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
+                        Pixel (crisp)
+                      </button>
+                      <button onClick={() => setScaleMode('smooth')}
+                        className={`py-1.5 rounded text-[11px] font-medium transition-colors ${scaleMode === 'smooth' ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}>
+                        Smooth
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-gray-600 mt-1.5 leading-tight">
+                      Pixel keeps hard edges (good for pixel art). Smooth uses bilinear filtering (good for illustrations).
+                    </p>
+                  </div>
+                </section>
+              )}
 
               <button onClick={process}
                 className="flex items-center justify-center gap-2 py-2.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-sm font-semibold transition-colors">
-                <Wand2 className="w-4 h-4" /> Process &amp; detect
+                <Wand2 className="w-4 h-4" /> {mode === 'single' ? 'Process sprite' : 'Process & detect'}
               </button>
+
+              {mode === 'single' && processedImageData && (
+                <div className="flex gap-2">
+                  <button onClick={downloadSingle}
+                    className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors">
+                    <Download className="w-3.5 h-3.5" /> Download PNG
+                  </button>
+                  <button onClick={copyBase64}
+                    className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-semibold transition-colors">
+                    <Clipboard className="w-3.5 h-3.5" /> {copied ? 'Copied!' : 'Copy as base64'}
+                  </button>
+                </div>
+              )}
 
               <button onClick={reset}
                 className="flex items-center justify-center gap-2 py-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-400 text-xs transition-colors">
@@ -257,15 +413,19 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0">
         {displayData && (
           <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900 flex-shrink-0">
-            <button onClick={() => setDrawMode(false)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${!drawMode ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'}`}>
-              <MousePointer className="w-3.5 h-3.5" /> Select
-            </button>
-            <button onClick={() => setDrawMode(true)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${drawMode ? 'bg-amber-700 text-white' : 'text-gray-500 hover:text-gray-300'}`}>
-              <PenLine className="w-3.5 h-3.5" /> Draw
-            </button>
-            <div className="w-px h-4 bg-gray-700 mx-1" />
+            {mode === 'sheet' && (
+              <>
+                <button onClick={() => setDrawMode(false)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${!drawMode ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'}`}>
+                  <MousePointer className="w-3.5 h-3.5" /> Select
+                </button>
+                <button onClick={() => setDrawMode(true)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${drawMode ? 'bg-amber-700 text-white' : 'text-gray-500 hover:text-gray-300'}`}>
+                  <PenLine className="w-3.5 h-3.5" /> Draw
+                </button>
+                <div className="w-px h-4 bg-gray-700 mx-1" />
+              </>
+            )}
             <button onClick={() => setZoom(z => Math.min(4, +(z + 0.25).toFixed(2)))}
               className="p-1.5 rounded text-gray-500 hover:text-gray-200 hover:bg-gray-800 transition-colors">
               <ZoomIn className="w-3.5 h-3.5" />
@@ -276,19 +436,24 @@ export default function App() {
               <ZoomOut className="w-3.5 h-3.5" />
             </button>
             <div className="flex-1" />
-            {drawMode && (
+            {mode === 'sheet' && drawMode && (
               <span className="text-[10px] text-amber-400 bg-amber-950/40 px-2 py-1 rounded">
                 Drag to draw a sprite boundary
               </span>
             )}
-            {!drawMode && !processedImageData && rawImageData && (
+            {mode === 'sheet' && !drawMode && !processedImageData && rawImageData && (
               <span className="text-[10px] text-gray-600">
                 Click an empty area to sample the background, then Process.
               </span>
             )}
-            {processedImageData && (
+            {mode === 'sheet' && processedImageData && (
               <span className="text-[10px] text-gray-500">
                 {sprites.length} sprite{sprites.length === 1 ? '' : 's'} detected
+              </span>
+            )}
+            {mode === 'single' && processedImageData && (
+              <span className="text-[10px] text-gray-500">
+                {processedImageData.width} x {processedImageData.height}px
               </span>
             )}
           </div>
@@ -302,7 +467,7 @@ export default function App() {
               </div>
               <div>
                 <p className="text-gray-400 font-medium mb-1">No image loaded</p>
-                <p className="text-gray-700 text-sm">Upload a sprite sheet using the panel on the left</p>
+                <p className="text-gray-700 text-sm">Upload {mode === 'single' ? 'a sprite' : 'a sprite sheet'} using the panel on the left</p>
               </div>
             </div>
           ) : (
@@ -311,7 +476,7 @@ export default function App() {
               sprites={sprites}
               selectedId={selectedId}
               zoom={zoom}
-              drawMode={drawMode}
+              drawMode={mode === 'sheet' && drawMode}
               onPixelClick={handlePixelClick}
               onSpriteClick={setSelectedId}
               onZoomChange={setZoom}
@@ -321,17 +486,19 @@ export default function App() {
         </div>
       </div>
 
-      <aside className="w-52 flex-shrink-0 border-l border-gray-800 bg-gray-900">
-        <SpriteRoster
-          sprites={sprites}
-          processedImageData={processedImageData}
-          selectedId={selectedId}
-          onSelect={setSelectedId}
-          onLabelChange={handleLabelChange}
-          onDelete={handleDelete}
-          onExportAll={exportAll}
-        />
-      </aside>
+      {mode === 'sheet' && (
+        <aside className="w-52 flex-shrink-0 border-l border-gray-800 bg-gray-900">
+          <SpriteRoster
+            sprites={sprites}
+            processedImageData={processedImageData}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            onLabelChange={handleLabelChange}
+            onDelete={handleDelete}
+            onExportAll={exportAll}
+          />
+        </aside>
+      )}
     </div>
   );
 }
