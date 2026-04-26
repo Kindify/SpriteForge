@@ -18,22 +18,29 @@ interface Props {
   selectedId: number | null;
   zoom: number;
   drawMode: boolean;
+  eraseMode?: boolean;
+  brushSize?: number;
+  brushHardness?: number;
   onPixelClick: (x: number, y: number) => void;
   onSpriteClick: (id: number) => void;
   onZoomChange: (z: number) => void;
   onRectDrawn: (rect: SpriteRect) => void;
+  onErase?: (x: number, y: number) => void;
+  onEraseStart?: () => void;
 }
 
 export default function CanvasViewer({
   processedImageData, sprites, selectedId, zoom, drawMode,
-  onPixelClick, onSpriteClick, onZoomChange, onRectDrawn,
+  eraseMode = false, brushSize = 12,
+  onPixelClick, onSpriteClick, onZoomChange, onRectDrawn, onErase, onEraseStart,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const drawStart = useRef<{ x: number; y: number } | null>(null);
+  const erasing = useRef(false);
   const [drawRect, setDrawRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [cursorPos, setCursorPos] = useState<{ x: number; y: number } | null>(null);
 
-  // Render image + overlays
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !processedImageData) return;
@@ -42,7 +49,6 @@ export default function CanvasViewer({
     const ctx = canvas.getContext('2d')!;
     ctx.putImageData(processedImageData, 0, 0);
 
-    // Draw sprite overlays
     for (const s of sprites) {
       const isSelected = s.id === selectedId;
       ctx.strokeStyle = isSelected ? '#22d3ee' : 'rgba(34,211,238,0.5)';
@@ -54,7 +60,6 @@ export default function CanvasViewer({
       }
     }
 
-    // Live draw rect
     if (drawRect) {
       ctx.strokeStyle = '#f59e0b';
       ctx.lineWidth = 1.5 / zoom;
@@ -62,7 +67,20 @@ export default function CanvasViewer({
       ctx.strokeRect(drawRect.x, drawRect.y, drawRect.w, drawRect.h);
       ctx.setLineDash([]);
     }
-  }, [processedImageData, sprites, selectedId, zoom, drawRect]);
+
+    if (eraseMode && cursorPos) {
+      ctx.strokeStyle = '#f43f5e';
+      ctx.lineWidth = 1.5 / zoom;
+      ctx.beginPath();
+      ctx.arc(cursorPos.x, cursorPos.y, brushSize, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+      ctx.lineWidth = 0.5 / zoom;
+      ctx.beginPath();
+      ctx.arc(cursorPos.x, cursorPos.y, brushSize, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }, [processedImageData, sprites, selectedId, zoom, drawRect, eraseMode, cursorPos, brushSize]);
 
   const toImageCoords = useCallback((e: React.MouseEvent) => {
     const canvas = canvasRef.current;
@@ -75,16 +93,26 @@ export default function CanvasViewer({
   }, [processedImageData, zoom]);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    if (!drawMode) return;
     const pos = toImageCoords(e);
     if (!pos) return;
+    if (eraseMode) {
+      erasing.current = true;
+      onEraseStart?.();
+      onErase?.(pos.x, pos.y);
+      return;
+    }
+    if (!drawMode) return;
     drawStart.current = pos;
-  }, [drawMode, toImageCoords]);
+  }, [drawMode, eraseMode, toImageCoords, onErase]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
-    if (!drawMode || !drawStart.current) return;
     const pos = toImageCoords(e);
-    if (!pos) return;
+    if (eraseMode) {
+      setCursorPos(pos);
+      if (erasing.current && pos) onErase?.(pos.x, pos.y);
+      return;
+    }
+    if (!drawMode || !drawStart.current || !pos) return;
     const { x: sx, y: sy } = drawStart.current;
     setDrawRect({
       x: Math.min(sx, pos.x),
@@ -92,12 +120,15 @@ export default function CanvasViewer({
       w: Math.abs(pos.x - sx),
       h: Math.abs(pos.y - sy),
     });
-  }, [drawMode, toImageCoords]);
+  }, [drawMode, eraseMode, toImageCoords, onErase]);
 
-  const handleMouseUp = useCallback((e: React.MouseEvent) => {
+  const handleMouseUp = useCallback(() => {
+    if (eraseMode) {
+      erasing.current = false;
+      return;
+    }
     if (!drawMode || !drawStart.current) return;
-    const pos = toImageCoords(e);
-    if (pos && drawRect && drawRect.w > 4 && drawRect.h > 4) {
+    if (drawRect && drawRect.w > 4 && drawRect.h > 4) {
       onRectDrawn({
         id: 0,
         x: Math.round(drawRect.x),
@@ -109,14 +140,17 @@ export default function CanvasViewer({
     }
     drawStart.current = null;
     setDrawRect(null);
-  }, [drawMode, toImageCoords, drawRect, onRectDrawn]);
+  }, [drawMode, eraseMode, drawRect, onRectDrawn]);
+
+  const handleMouseLeave = useCallback(() => {
+    setCursorPos(null);
+    erasing.current = false;
+  }, []);
 
   const handleClick = useCallback((e: React.MouseEvent) => {
-    if (drawMode) return;
+    if (drawMode || eraseMode) return;
     const pos = toImageCoords(e);
     if (!pos) return;
-
-    // Check sprite hit
     for (const s of [...sprites].reverse()) {
       if (pos.x >= s.x && pos.x <= s.x + s.width && pos.y >= s.y && pos.y <= s.y + s.height) {
         onSpriteClick(s.id);
@@ -124,12 +158,12 @@ export default function CanvasViewer({
       }
     }
     onPixelClick(Math.round(pos.x), Math.round(pos.y));
-  }, [drawMode, toImageCoords, sprites, onSpriteClick, onPixelClick]);
+  }, [drawMode, eraseMode, toImageCoords, sprites, onSpriteClick, onPixelClick]);
 
   const handleWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault();
     const delta = e.deltaY > 0 ? -0.1 : 0.1;
-    onZoomChange(Math.min(4, Math.max(0.1, +(zoom + delta).toFixed(2))));
+    onZoomChange(Math.min(8, Math.max(0.1, +(zoom + delta).toFixed(2))));
   }, [zoom, onZoomChange]);
 
   if (!processedImageData) {
@@ -149,12 +183,13 @@ export default function CanvasViewer({
             width: processedImageData.width * zoom,
             height: processedImageData.height * zoom,
             imageRendering: zoom >= 2 ? 'pixelated' : 'auto',
-            cursor: drawMode ? 'crosshair' : 'default',
+            cursor: eraseMode ? 'none' : drawMode ? 'crosshair' : 'default',
             display: 'block',
           }}
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseLeave}
           onClick={handleClick}
         />
       </div>

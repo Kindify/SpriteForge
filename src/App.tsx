@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import { Wand2, ZoomIn, ZoomOut, MousePointer, PenLine, RotateCcw, Download, Clipboard } from 'lucide-react';
+import { Wand2, ZoomIn, ZoomOut, MousePointer, PenLine, RotateCcw, Download, Clipboard, Eraser, Undo2 } from 'lucide-react';
 import UploadZone from './components/UploadZone';
 import CanvasViewer from './components/CanvasViewer';
 import SpriteRoster from './components/SpriteRoster';
@@ -65,6 +65,10 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [zoom, setZoom] = useState(1);
   const [drawMode, setDrawMode] = useState(false);
+  const [eraseMode, setEraseMode] = useState(false);
+  const [brushSize, setBrushSize] = useState(14);
+  const [brushHardness, setBrushHardness] = useState(80);
+  const undoStack = useRef<ImageData[]>([]);
 
   const [bgColor, setBgColor] = useState('#555555');
   const [tolerance, setTolerance] = useState(45);
@@ -141,6 +145,53 @@ export default function App() {
     setSprites(assignIds(detected));
     setSelectedId(null);
   }, [rawImageData, bgColor, tolerance, feather, edgeWidth, minPixels, minDim, maxAspect, padding, erosion, mode, sizePreset, targetSize, customW, customH, scaleMode]);
+
+  const handleErase = useCallback((cx: number, cy: number) => {
+    setProcessedImageData(prev => {
+      if (!prev) return prev;
+      const { width, height, data } = prev;
+      const out = new Uint8ClampedArray(data);
+      const r = brushSize;
+      const r2 = r * r;
+      const x0 = Math.max(0, Math.floor(cx - r));
+      const y0 = Math.max(0, Math.floor(cy - r));
+      const x1 = Math.min(width - 1, Math.ceil(cx + r));
+      const y1 = Math.min(height - 1, Math.ceil(cy + r));
+      const innerR = r * (brushHardness / 100);
+      const innerR2 = innerR * innerR;
+      const featherRange = r2 - innerR2;
+      for (let y = y0; y <= y1; y++) {
+        for (let x = x0; x <= x1; x++) {
+          const dx = x - cx, dy = y - cy;
+          const d2 = dx * dx + dy * dy;
+          if (d2 > r2) continue;
+          const idx = (y * width + x) * 4 + 3;
+          if (d2 <= innerR2 || featherRange <= 0) {
+            out[idx] = 0;
+          } else {
+            const t = (d2 - innerR2) / featherRange;
+            out[idx] = Math.min(out[idx], Math.round(out[idx] * t));
+          }
+        }
+      }
+      return new ImageData(out, width, height);
+    });
+  }, [brushSize, brushHardness]);
+
+  const pushUndo = useCallback(() => {
+    if (!processedImageData) return;
+    undoStack.current.push(new ImageData(
+      new Uint8ClampedArray(processedImageData.data),
+      processedImageData.width,
+      processedImageData.height,
+    ));
+    if (undoStack.current.length > 30) undoStack.current.shift();
+  }, [processedImageData]);
+
+  const undo = useCallback(() => {
+    const prev = undoStack.current.pop();
+    if (prev) setProcessedImageData(prev);
+  }, []);
 
   const handlePixelClick = useCallback((x: number, y: number) => {
     if (!rawImageData) return;
@@ -329,6 +380,30 @@ export default function App() {
                 </section>
               )}
 
+              {processedImageData && (
+                <section className="flex flex-col gap-3">
+                  <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest block">Manual cleanup</label>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button onClick={() => { setEraseMode(e => !e); setDrawMode(false); }}
+                      className={`flex items-center justify-center gap-1.5 py-2 rounded text-xs font-semibold transition-colors ${eraseMode ? 'bg-rose-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}>
+                      <Eraser className="w-3.5 h-3.5" /> {eraseMode ? 'Erasing' : 'Erase'}
+                    </button>
+                    <button onClick={undo} disabled={undoStack.current.length === 0}
+                      className="flex items-center justify-center gap-1.5 py-2 rounded text-xs font-semibold bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                      <Undo2 className="w-3.5 h-3.5" /> Undo
+                    </button>
+                  </div>
+                  <Slider
+                    label="Brush size"
+                    hint="Click and drag on the canvas to paint transparency. Use the toolbar zoom (or mouse wheel) for precision on small artifacts."
+                    value={brushSize} min={1} max={120} onChange={setBrushSize} suffix="px" />
+                  <Slider
+                    label="Brush hardness"
+                    hint="100 = sharp circular eraser. Lower values feather the brush edge for soft cleanups."
+                    value={brushHardness} min={0} max={100} step={5} onChange={setBrushHardness} suffix="%" />
+                </section>
+              )}
+
               {mode === 'single' && (
                 <section className="flex flex-col gap-3">
                   <label className="text-[10px] font-semibold text-gray-500 uppercase tracking-widest block">4. Output size</label>
@@ -415,18 +490,31 @@ export default function App() {
           <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900 flex-shrink-0">
             {mode === 'sheet' && (
               <>
-                <button onClick={() => setDrawMode(false)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${!drawMode ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'}`}>
+                <button onClick={() => { setDrawMode(false); setEraseMode(false); }}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${!drawMode && !eraseMode ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'}`}>
                   <MousePointer className="w-3.5 h-3.5" /> Select
                 </button>
-                <button onClick={() => setDrawMode(true)}
+                <button onClick={() => { setDrawMode(true); setEraseMode(false); }}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${drawMode ? 'bg-amber-700 text-white' : 'text-gray-500 hover:text-gray-300'}`}>
                   <PenLine className="w-3.5 h-3.5" /> Draw
                 </button>
                 <div className="w-px h-4 bg-gray-700 mx-1" />
               </>
             )}
-            <button onClick={() => setZoom(z => Math.min(4, +(z + 0.25).toFixed(2)))}
+            {processedImageData && (
+              <>
+                <button onClick={() => { setEraseMode(e => !e); setDrawMode(false); }}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${eraseMode ? 'bg-rose-600 text-white' : 'text-gray-500 hover:text-gray-300'}`}>
+                  <Eraser className="w-3.5 h-3.5" /> Erase
+                </button>
+                <button onClick={undo} disabled={undoStack.current.length === 0}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium text-gray-500 hover:text-gray-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors">
+                  <Undo2 className="w-3.5 h-3.5" /> Undo
+                </button>
+                <div className="w-px h-4 bg-gray-700 mx-1" />
+              </>
+            )}
+            <button onClick={() => setZoom(z => Math.min(8, +(z + 0.25).toFixed(2)))}
               className="p-1.5 rounded text-gray-500 hover:text-gray-200 hover:bg-gray-800 transition-colors">
               <ZoomIn className="w-3.5 h-3.5" />
             </button>
@@ -477,10 +565,15 @@ export default function App() {
               selectedId={selectedId}
               zoom={zoom}
               drawMode={mode === 'sheet' && drawMode}
+              eraseMode={eraseMode && !!processedImageData}
+              brushSize={brushSize}
+              brushHardness={brushHardness}
               onPixelClick={handlePixelClick}
               onSpriteClick={setSelectedId}
               onZoomChange={setZoom}
               onRectDrawn={handleRectDrawn}
+              onErase={handleErase}
+              onEraseStart={pushUndo}
             />
           )}
         </div>
